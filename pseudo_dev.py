@@ -4,11 +4,11 @@ from cellpose import models, io, transforms, core, utils
 from omnipose.utils import normalize99
 import os
 import tensorflow as tf
+import cv2
 import glob
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
-
+from scene_generation import scene_generation
 from delta.data import saveResult_seg, predictGenerator_seg, postprocess, readreshape
-from delta.model import unet_seg
 from delta.utilities import cfg
 from delta.model import unet_rois, unet_seg
 from delta.data import trainGenerator_seg
@@ -125,8 +125,8 @@ training_set = "/home/ameyasu/cuda_ws/src/pseudo_labelling_real/training_set_del
 conv_files = io.get_image_files(training_set + "/convolutions")
 #mask_files = io.get_image_files(training_set + "/masks")
 
-number_of_trenches = 20
-time_frame_each_ite = 10
+number_of_trenches = 200
+time_frame_each_ite = 20
 time_frame_number = 1597
 
 time_frame = 0
@@ -134,13 +134,17 @@ training_set = "/home/ameyasu/cuda_ws/src/pseudo_labelling_real/training_set_del
 conv_files = io.get_image_files(training_set + "/convolutions")
 training_set_in_use = "/home/ameyasu/cuda_ws/src/pseudo_labelling_real/training_set_in_use_delta"
 masks_dir = training_set_in_use + "/masks/"
+convs_dir = training_set_in_use + "/convolutions/"
 temp_masks_dir = training_set_in_use + "/temp_convolutions/segmentation/"
 temp_convs_dir = training_set_in_use + "/temp_convolutions/"
 
 for i in range(0, int(time_frame_number/time_frame_each_ite)):
     # ---------------------------------------------------------------------
     #Generate Test Data
-    temp_convs_files = conv_files[time_frame:time_frame + number_of_trenches*time_frame_each_ite]
+    if time_frame + number_of_trenches*time_frame_each_ite < len(conv_files):
+        temp_convs_files = conv_files[time_frame:time_frame + number_of_trenches*time_frame_each_ite]
+    else:
+        temp_convs_files = conv_files[time_frame:-1]
     for j,temp_conv in enumerate(temp_convs_files):
         Image.fromarray(np.array(tifffile.imread(temp_conv))).save(f"{training_set_in_use}/temp_convolutions/train_{str(j).zfill(5)}.tif")
 
@@ -176,7 +180,7 @@ for i in range(0, int(time_frame_number/time_frame_each_ite)):
     # Process
     while unprocessed:
         # Pop out filenames
-        ps = min(4096, len(unprocessed))  # 4096 at a time
+        ps = min(1500, len(unprocessed))  # 4096 at a time
         to_process = unprocessed[0:ps]
         del unprocessed[0:ps]
 
@@ -187,69 +191,80 @@ for i in range(0, int(time_frame_number/time_frame_each_ite)):
             target_size=cfg.target_size_rois,
             crop=cfg.crop_windows,
         )
-
-        # mother machine: Don't crop images into windows
-        if not cfg.crop_windows:
-            # Predictions:
-            results = model.predict(predGene, verbose=1)[:, :, :, 0]
-
-        # 2D: Cut into overlapping windows
-        else:
-            img = readreshape(
-                os.path.join(inputs_folder, to_process[0]),
-                target_size=cfg.target_size_rois,
-                crop=True,
-            )
-            # Create array to store predictions
-            results = np.zeros((len(to_process), img.shape[0], img.shape[1], 1))
-            # Crop, segment, stitch and store predictions in results
-            for j in range(len(to_process)):
-                # Crop each frame into overlapping windows:
-                windows, loc_y, loc_x = utils.create_windows(
-                    next(predGene)[0, :, :], target_size=cfg.target_size_rois
-                )
-                # We have to play around with tensor dimensions to conform to
-                # tensorflow's functions:
-                windows = windows[:, :, :, np.newaxis]
-                # Predictions:
-                pred = model.predict(windows, verbose=1, steps=windows.shape[0])
-                # Stich prediction frames back together:
-                pred = utils.stitch_pic(pred[:, :, :, 0], loc_y, loc_x)
-                pred = pred[np.newaxis, :, :, np.newaxis]  # Mess around with dims
-
-                results[j] = pred
-
+        # Predictions:
+        results = model.predict(predGene, verbose=1)
         # Post process results (binarize + light morphology-based cleaning):
-        results = postprocess(results, crop=cfg.crop_windows)
+        results = np.squeeze(results)
+        #results = np.argmax(results, axis=3)[:,:,:]
+        results = postprocess(results, min_size = 20, crop=cfg.crop_windows)
+        for i, result in enumerate(results):
+            ret, results[i] = cv2.connectedComponents(np.uint8(result))
 
         # Save to disk:
         saveResult_seg(outputs_folder, results, files_list=to_process)
 
     #-------------------------------------------------------
     #Compare cell statistics
+
     masks_files = io.get_image_files(masks_dir)
     temp_masks_files = io.get_image_files(temp_masks_dir)
     temp_convs_files = io.get_image_files(temp_convs_dir)
+
+    print("Time Frame Number: " + str(time_frame))
 
     masks = np.array([list(tifffile.imread(mask_file)) for mask_file in masks_files], dtype=list)
     temp_masks = np.array([list(tifffile.imread(temp_mask_file)) for temp_mask_file in temp_masks_files], dtype=list)
 
     for j in range(0, time_frame_each_ite):
-        Image.fromarray(np.array(tifffile.imread(temp_masks_files[i*number_of_trenches+7]))).save(f"{training_set_in_use}/results/7/train_{str(time_frame+j*number_of_trenches+7).zfill(5)}.tif")
-        Image.fromarray(np.array(tifffile.imread(temp_masks_files[i*number_of_trenches+14]))).save(f"{training_set_in_use}/results/14/train_{str(time_frame+j*number_of_trenches+14).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_masks_files[j*number_of_trenches+7]))).save(f"{training_set_in_use}/results/1/masks/train_{str(time_frame+j*number_of_trenches+7).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_masks_files[j*number_of_trenches+14]))).save(f"{training_set_in_use}/results/2/masks/train_{str(time_frame+j*number_of_trenches+14).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_masks_files[j*number_of_trenches+21]))).save(f"{training_set_in_use}/results/3/masks/train_{str(time_frame+j*number_of_trenches+21).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_masks_files[j*number_of_trenches+28]))).save(f"{training_set_in_use}/results/4/masks/train_{str(time_frame+j*number_of_trenches+28).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_masks_files[j*number_of_trenches+35]))).save(f"{training_set_in_use}/results/5/masks/train_{str(time_frame+j*number_of_trenches+35).zfill(5)}.tif")
+
+        Image.fromarray(np.array(tifffile.imread(temp_convs_files[j*number_of_trenches+7]))).save(f"{training_set_in_use}/results/1/convolutions/train_{str(time_frame+j*number_of_trenches+7).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_convs_files[j*number_of_trenches+14]))).save(f"{training_set_in_use}/results/2/convolutions/train_{str(time_frame+j*number_of_trenches+14).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_convs_files[j*number_of_trenches+21]))).save(f"{training_set_in_use}/results/3/convolutions/train_{str(time_frame+j*number_of_trenches+21).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_convs_files[j*number_of_trenches+28]))).save(f"{training_set_in_use}/results/4/convolutions/train_{str(time_frame+j*number_of_trenches+28).zfill(5)}.tif")
+        Image.fromarray(np.array(tifffile.imread(temp_convs_files[j*number_of_trenches+35]))).save(f"{training_set_in_use}/results/5/convolutions/train_{str(time_frame+j*number_of_trenches+35).zfill(5)}.tif")
     
     masks_stat = cell_statistics(masks)
     temp_masks_stat = cell_statistics(temp_masks)
-
+    print("Length Change: " + str((temp_masks_stat[0] - masks_stat[0])/masks_stat[0]))
+    print("Width Change: " + str((temp_masks_stat[1] - masks_stat[1])/masks_stat[1]))
     if abs(temp_masks_stat[0] - masks_stat[0])/masks_stat[0] > 0.05 or abs(temp_masks_stat[1] - masks_stat[1])/masks_stat[1] > 0.05:
-        for i,temp_conv in enumerate(temp_convs_files):
-            Image.fromarray(np.array(tifffile.imread(temp_conv))).save(f"{training_set_in_use}/convolutions/train_{str(i).zfill(5)}.tif")
-        for i,temp_mask in enumerate(temp_masks_files):
-            Image.fromarray(np.array(tifffile.imread(temp_mask))).save(f"{training_set_in_use}/masks/train_{str(i).zfill(5)}.tif")
+        
+        length_variation = (temp_masks_stat[0] - masks_stat[0])/masks_stat[0]
+        width_variation = (temp_masks_stat[1] - masks_stat[1])/masks_stat[1]
+        
+        for f in glob.glob(masks_dir + "*.tif"):
+            os.remove(f)
 
-    # ------------------------------------------------------
-    # Train
-    # Load config:
+        for f in glob.glob(convs_dir + "*.tif"):
+            os.remove(f)
+
+        if abs(length_variation) > 0.1 or abs(width_variation) > 0.1:
+            valid_pseudo_proportion = 1. - (abs(length_variation) - 0.1)/(abs(length_variation) - 0.05)
+            valid_time_frames = int(time_frame_each_ite*valid_pseudo_proportion)
+            for k,temp_conv in enumerate(temp_convs_files[0:(valid_time_frames*number_of_trenches)]):
+                Image.fromarray(np.array(tifffile.imread(temp_conv))).save(f"{training_set_in_use}/convolutions/train_{str(k).zfill(5)}.tif")
+            for k,temp_mask in enumerate(temp_masks_files[0:(valid_time_frames*number_of_trenches)]):
+                Image.fromarray(np.array(tifffile.imread(temp_mask))).save(f"{training_set_in_use}/masks/train_{str(k).zfill(5)}.tif")
+            length = masks_stat[0]*(1 + np.sign(length_variation)*0.1)*0.065*0.6
+            sample_size = (time_frame_each_ite - valid_time_frames)*number_of_trenches
+            sample_size = min(sample_size, 1000)
+            scene_generation(length = length, length_var = length/4, width = 0.95, width_var = 0.2, sim_length = sample_size + 100, sample_size = sample_size, initialised = True, save_dir=training_set_in_use)
+            time_frame += number_of_trenches*valid_time_frames
+        else:
+            for k,temp_conv in enumerate(temp_convs_files):
+                Image.fromarray(np.array(tifffile.imread(temp_conv))).save(f"{training_set_in_use}/convolutions/train_{str(k).zfill(5)}.tif")
+            for k,temp_mask in enumerate(temp_masks_files):
+                Image.fromarray(np.array(tifffile.imread(temp_mask))).save(f"{training_set_in_use}/masks/train_{str(k).zfill(5)}.tif")
+            time_frame += number_of_trenches*time_frame_each_ite
+
+        # ------------------------------------------------------
+        # Train
+        # Load config:
         cfg.load_config(json_file="/home/ameyasu/.delta/config_mothermachine_mixture.json", presets="mothermachine")
 
         # Files:
@@ -260,23 +275,20 @@ for i in range(0, int(time_frame_number/time_frame_each_ite)):
         print(cfg.target_size_rois)
 
         # Parameters:
-        batch_size = 20
-        epochs = 600
+        batch_size = 40
+        epochs = 30
         steps_per_epoch = 100
-        patience = 50
+        patience = 5
 
         # Data generator parameters:
         data_gen_args = dict(
-            rotation=3,
-            shiftX=0.1,
-            shiftY=0.1,
-            zoom=0.25,
-            horizontal_flip=True,
-            vertical_flip=True,
-            rotations_90d=True,
-            histogram_voodoo=True,
-            illumination_voodoo=True,
+            rotation=0,
+            rotations_90d=False,
+            horizontal_flip=False,
+            vertical_flip=False,
+            illumination_voodoo=False,
             gaussian_noise=0.03,
+            gaussian_blur=1,
         )
 
         # Generator init:
@@ -305,5 +317,5 @@ for i in range(0, int(time_frame_number/time_frame_each_ite)):
             epochs=epochs,
             callbacks=[model_checkpoint, early_stopping],
         )
-
-    time_frame += number_of_trenches*time_frame_each_ite
+    else:
+        time_frame += number_of_trenches*time_frame_each_ite
