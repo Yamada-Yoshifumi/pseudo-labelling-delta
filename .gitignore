@@ -1,9 +1,7 @@
-/training_set_delta/*
-/training_set_in_use_delta/*
-/training_set_omnipose/*
-/training_set_in_use_omnipose/*
-/.git/
-/__pycache__/
-/.ipynb_checkpoints/
-/cell_timeseries.p
-/space_timeseries.p
+/*
+!/benchmark.ipynb
+!/pseudo_dev.ipynb
+!/pseudo_dev.py
+!/pseudo_dev_omni.py
+!/scene_generation.py
+!/.gitignore
